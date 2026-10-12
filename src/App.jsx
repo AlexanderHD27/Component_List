@@ -381,7 +381,7 @@ function App() {
               />
               <div className="field-add">
                 <input type="text" placeholder="New main..." value={newLocMain} onChange={(e) => setNewLocMain(e.target.value)} />
-                <input type="text" placeholder="New subcathegory..." value={newLocSec} onChange={(e) => setNewLocSec(e.target.value)} />
+                <input type="text" placeholder="New shelf..." value={newLocSec} onChange={(e) => setNewLocSec(e.target.value)} />
                 <button type="button" className="btn btn-sm" onClick={handleAddLocation}>Add</button>
               </div>
             </div>
