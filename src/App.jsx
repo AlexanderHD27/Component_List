@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import './App.css'
-import { visibleRows } from './views'
+import { visibleRows, sortRows, splitLoc, joinLoc } from './views'
+
+const newKey = () => Math.random().toString(36).slice(2, 11)
 
 const BLANK_FORM = {
   inventory_key: '',
@@ -12,31 +14,95 @@ const BLANK_FORM = {
   manufacturer_nr: ''
 }
 
+// Every call goes through here; a non-2xx response throws with the server's error text.
+const api = async (path, { method = 'GET', body, pw } = {}) => {
+  const res = await fetch('/api' + path, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...(pw && { 'x-admin-password': pw }) },
+    body: body && JSON.stringify(body)
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || res.statusText)
+  return data
+}
+
+// Wraps a user action so a failure surfaces as an alert instead of vanishing.
+const act = (fn) => (...args) => fn(...args).catch((err) => alert(err.message))
+
+// The two dependent dropdowns over the locations relation list. value/onChange carry the
+// single joined "Main - Secondary" string, so callers never deal with the two halves.
+const LocationPicker = ({ value, onChange, locations }) => {
+  const { main, secondary } = splitLoc(value)
+  const mains = [...new Set(locations.map(l => l.main))]
+  return (
+    <>
+      <select value={main} onChange={(e) => onChange(e.target.value)}>
+        <option value="">Select Main Location</option>
+        {mains.map(m => <option key={m} value={m}>{m}</option>)}
+      </select>
+      <select value={secondary} disabled={!main} onChange={(e) => onChange(joinLoc(main, e.target.value))}>
+        <option value="">Select Shelf</option>
+        {locations.filter(l => l.main === main).map(l => <option key={l.id} value={l.secondary}>{l.secondary}</option>)}
+      </select>
+    </>
+  )
+}
+
+// One-input dialog. actions are [label, className, onClick(value)]; Enter fires the first.
+const Modal = ({ title, type = 'number', placeholder, actions, onClose }) => {
+  const [value, setValue] = useState('')
+  const fire = (fn) => { fn(value); setValue('') }
+  return (
+    <div className="modal-backdrop">
+      <div className="modal">
+        <h2>{title}</h2>
+        <input
+          type={type}
+          autoFocus
+          min="0"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={placeholder}
+          onKeyDown={(e) => e.key === 'Enter' && fire(actions[0][2])}
+        />
+        <div className="actions">
+          <button className="btn" onClick={onClose}>Cancel</button>
+          {actions.map(([label, cls, fn]) => (
+            <button key={label} className={'btn ' + cls} onClick={() => fire(fn)}>{label}</button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [components, setComponents] = useState([])
   const [categories, setCategories] = useState([])
   const [packages, setPackages] = useState([])
+  const [locations, setLocations] = useState([])
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('')
   const [showForm, setShowForm] = useState(false)
   const [newCategory, setNewCategory] = useState('')
   const [newPackage, setNewPackage] = useState('')
+  const [newLocMain, setNewLocMain] = useState('')
+  const [newLocSec, setNewLocSec] = useState('')
   const [form, setForm] = useState(BLANK_FORM)
   const [showPasswordModal, setShowPasswordModal] = useState(false)
-  const [passwordInput, setPasswordInput] = useState('')
   const [adminPw, setAdminPw] = useState('')
   const [suggestedComponents, setSuggestedComponents] = useState([])
   const [showSuggested, setShowSuggested] = useState(false)
   const [showUseModal, setShowUseModal] = useState(null)
-  const [useAmount, setUseAmount] = useState('')
   const [showReportRealModal, setShowReportRealModal] = useState(null)
-  const [reportRealAmount, setReportRealAmount] = useState('')
   const [filterZeroStock, setFilterZeroStock] = useState(true)
   const [view, setView] = useState('all')
+  const [sortDir, setSortDir] = useState('asc')
   const [lowThreshold, setLowThreshold] = useState(5)
   const [reports, setReports] = useState([])
-
-  const API = 'http://localhost:3001/api'
+  const [ctxMenu, setCtxMenu] = useState(null)
+  const [editKey, setEditKey] = useState(null)
+  const [editForm, setEditForm] = useState(null)
 
   useEffect(() => {
     loadLists()
@@ -44,234 +110,141 @@ function App() {
     fetchSuggestedComponents()
   }, [search, categoryFilter])
 
-  useEffect(() => {
-    if (showForm && !form.inventory_key) {
-      setForm(f => ({ ...f, inventory_key: Math.random().toString(36).substr(2, 9) }))
-    }
-  }, [showForm])
+  const loadLists = () =>
+    Promise.all(['categories', 'packages', 'locations'].map((p) => api('/' + p)))
+      .then(([c, p, l]) => { setCategories(c); setPackages(p); setLocations(l) })
+      .catch(console.error)
 
-  const loadLists = async () => {
-    try {
-      const [catRes, pkgRes] = await Promise.all([
-        fetch(`${API}/categories`),
-        fetch(`${API}/packages`)
-      ])
-      setCategories(await catRes.json())
-      setPackages(await pkgRes.json())
-    } catch (err) {
-      console.error(err)
-    }
+  const fetchComponents = () =>
+    api('/components?' + new URLSearchParams({ search, category: categoryFilter })).then(setComponents).catch(console.error)
+
+  const fetchSuggestedComponents = () => api('/suggested_components').then(setSuggestedComponents).catch(console.error)
+
+  const fetchReports = act(async (pw) => setReports(await api('/reports', { pw })))
+
+  const toggleForm = () => {
+    if (!showForm) setForm(f => (f.inventory_key ? f : { ...f, inventory_key: newKey() }))
+    setShowForm(!showForm)
   }
 
-  const fetchComponents = async () => {
-    try {
-      let url = `${API}/components?search=${search}`
-      if (categoryFilter) url += `&category=${categoryFilter}`
-      const res = await fetch(url)
-      setComponents(await res.json())
-    } catch (err) {
-      console.error(err)
-    }
+  // categories and packages are both plain name lists behind the same POST shape.
+  const addName = act(async (kind, value, reset) => {
+    if (!value.trim()) return
+    await api('/' + kind, { method: 'POST', body: { name: value } })
+    reset('')
+    loadLists()
+  })
+
+  const startEdit = (comp) => {
+    setCtxMenu(null)
+    setEditKey(comp.inventory_key)
+    setEditForm({ ...comp })
   }
 
-  const fetchSuggestedComponents = async () => {
-    try {
-      const res = await fetch(`${API}/suggested_components`)
-      setSuggestedComponents(await res.json())
-    } catch (err) {
-      console.error(err)
-    }
+  // Copy reuses the add form wholesale. Everything carries over except the identity,
+  // which has to be new or the save would collide with the part being copied.
+  const startCopy = (comp) => {
+    setCtxMenu(null)
+    cancelEdit()
+    setForm({ ...comp, inventory_key: newKey() })
+    setShowForm(true)
   }
 
-  const fetchReports = async (pw) => {
-    try {
-      const res = await fetch(`${API}/reports`, { headers: { 'x-admin-password': pw } })
-      if (!res.ok) return alert('Could not load reports')
-      setReports(await res.json())
-    } catch (err) {
-      console.error(err)
-    }
-  }
+  const cancelEdit = () => { setEditKey(null); setEditForm(null) }
 
-  const handleAddCategory = async (e) => {
-    e.preventDefault()
-    if (!newCategory.trim()) return
-    try {
-      await fetch(`${API}/categories`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newCategory })
-      })
-      setNewCategory('')
-      loadLists()
-    } catch (err) {
-      console.error(err)
-    }
-  }
+  // Admin writes the part directly; everyone else files the same edit as a suggestion,
+  // which the existing approve flow then upserts onto the live row.
+  const saveEdit = act(async () => {
+    await api(`/components/${editKey}`, { method: 'PUT', body: editForm, pw: adminPw })
+    cancelEdit()
+    fetchComponents()
+  })
 
-  const handleAddPackage = async (e) => {
-    e.preventDefault()
-    if (!newPackage.trim()) return
-    try {
-      await fetch(`${API}/packages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newPackage })
-      })
-      setNewPackage('')
-      loadLists()
-    } catch (err) {
-      console.error(err)
-    }
-  }
+  const suggestEdit = act(async () => {
+    await api('/suggested_components', { method: 'POST', body: editForm })
+    cancelEdit()
+    fetchSuggestedComponents()
+  })
 
-  const handleAdd = async (e) => {
+  const handleAddLocation = act(async () => {
+    if (!newLocMain.trim() || !newLocSec.trim()) return
+    await api('/locations', { method: 'POST', body: { main: newLocMain, secondary: newLocSec } })
+    setNewLocSec('')
+    loadLists()
+  })
+
+  const handleAdd = (e) => {
     e.preventDefault()
     if (!adminPw) return setShowPasswordModal(true)
     saveComponent(adminPw)
   }
 
-  const saveComponent = async (pw) => {
-    try {
-      const res = await fetch(`${API}/components`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-admin-password': pw },
-        body: JSON.stringify(form)
-      })
-      if (!res.ok) return alert('Save failed')
-      setForm(BLANK_FORM)
-      setShowForm(false)
-      fetchComponents()
-    } catch (err) {
-      console.error(err)
-    }
-  }
+  const saveComponent = act(async (pw) => {
+    await api('/components', { method: 'POST', body: form, pw })
+    setForm(BLANK_FORM)
+    setShowForm(false)
+    fetchComponents()
+  })
 
-  const handleSuggest = async (e) => {
-    e.preventDefault()
-    try {
-      await fetch(`${API}/suggested_components`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form)
-      })
-      setForm(BLANK_FORM)
-      setShowForm(false)
-      fetchSuggestedComponents()
-    } catch (err) {
-      console.error(err)
-    }
-  }
+  const handleSuggest = act(async () => {
+    await api('/suggested_components', { method: 'POST', body: form })
+    setForm(BLANK_FORM)
+    setShowForm(false)
+    fetchSuggestedComponents()
+  })
 
   const handleUnlock = async (password) => {
     try {
-      const res = await fetch(`${API}/admin/check`, { headers: { 'x-admin-password': password } })
-      if (!res.ok) {
-        alert('Incorrect password')
-        setPasswordInput('')
-        return
-      }
-      setAdminPw(password)
-      setShowPasswordModal(false)
-      setPasswordInput('')
-      if (showForm) saveComponent(password)
-    } catch (err) {
-      console.error(err)
+      await api('/admin/check', { pw: password })
+    } catch {
+      return alert('Incorrect password')
     }
+    setAdminPw(password)
+    setShowPasswordModal(false)
+    if (showForm) saveComponent(password)
   }
 
-  const handleDelete = async (key, name) => {
+  const handleDelete = act(async (key, name) => {
     if (!confirm(`Delete "${name}" (${key})? This cannot be undone.`)) return
-    try {
-      const res = await fetch(`${API}/components/${key}`, {
-        method: 'DELETE',
-        headers: { 'x-admin-password': adminPw }
-      })
-      if (!res.ok) return alert('Delete failed')
-      fetchComponents()
-    } catch (err) {
-      console.error(err)
-    }
-  }
+    await api(`/components/${key}`, { method: 'DELETE', pw: adminPw })
+    fetchComponents()
+  })
 
-  const handleApprove = async (key) => {
-    try {
-      const res = await fetch(`${API}/suggested_components/${key}/approve`, {
-        method: 'POST',
-        headers: { 'x-admin-password': adminPw }
-      })
-      if (!res.ok) return alert('Approve failed — inventory key may already exist')
-      fetchComponents()
-      fetchSuggestedComponents()
-    } catch (err) {
-      console.error(err)
-    }
-  }
+  const handleApprove = act(async (key) => {
+    await api(`/suggested_components/${key}/approve`, { method: 'POST', pw: adminPw })
+    fetchComponents()
+    fetchSuggestedComponents()
+  })
 
-  const handleReject = async (key, name) => {
+  const handleReject = act(async (key, name) => {
     if (!confirm(`Reject suggestion "${name}"?`)) return
-    try {
-      const res = await fetch(`${API}/suggested_components/${key}`, {
-        method: 'DELETE',
-        headers: { 'x-admin-password': adminPw }
-      })
-      if (!res.ok) return alert('Reject failed')
-      fetchSuggestedComponents()
-    } catch (err) {
-      console.error(err)
-    }
-  }
+    await api(`/suggested_components/${key}`, { method: 'DELETE', pw: adminPw })
+    fetchSuggestedComponents()
+  })
 
-  const handleReport = async (inventory_key, report_type) => {
-    try {
-      await fetch(`${API}/reports`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inventory_key, report_type })
-      })
-      fetchComponents()
-    } catch (err) {
-      console.error(err)
-    }
-  }
+  const handleReport = act(async (inventory_key, report_type) => {
+    await api('/reports', { method: 'POST', body: { inventory_key, report_type } })
+    fetchComponents()
+  })
 
-  const handleUse = async (inventory_key, action) => {
-    if (!useAmount || isNaN(useAmount)) return
-    try {
-      const res = await fetch(`${API}/components/${inventory_key}/use`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: parseInt(useAmount), action })
-      })
-      const data = await res.json()
-      setShowUseModal(null)
-      setUseAmount('')
-      fetchComponents()
-    } catch (err) {
-      console.error(err)
-    }
-  }
+  const handleUse = act(async (inventory_key, action, amount) => {
+    if (!amount || isNaN(amount)) return
+    await api(`/components/${inventory_key}/use`, { method: 'POST', body: { amount: parseInt(amount), action } })
+    setShowUseModal(null)
+    fetchComponents()
+  })
 
-  const handleReportReal = async (inventory_key) => {
-    if (!reportRealAmount || isNaN(reportRealAmount)) return
-    try {
-      await fetch(`${API}/components/${inventory_key}/report-real`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reported_number: parseInt(reportRealAmount) })
-      })
-      setShowReportRealModal(null)
-      setReportRealAmount('')
-      fetchComponents()
-    } catch (err) {
-      console.error(err)
-    }
-  }
+  const handleReportReal = act(async (inventory_key, amount) => {
+    if (!amount || isNaN(amount)) return
+    await api(`/components/${inventory_key}/report-real`, { method: 'POST', body: { reported_number: parseInt(amount) } })
+    setShowReportRealModal(null)
+    fetchComponents()
+  })
 
-  const rows = visibleRows(components, view, lowThreshold, filterZeroStock)
+  const rows = sortRows(visibleRows(components, view, lowThreshold, filterZeroStock), sortDir)
 
   const suggestedRows =
-    view === 'suggested' || (view === 'all' && showSuggested) ? suggestedComponents : []
+    view === 'suggested' || (view === 'all' && showSuggested) ? sortRows(suggestedComponents, sortDir) : []
 
   const changeView = (next) => {
     setView(next)
@@ -295,7 +268,13 @@ function App() {
             <option value="">All Categories</option>
             {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
           </select>
-          <button className={showForm ? 'btn' : 'btn btn-primary'} onClick={() => setShowForm(!showForm)}>
+          {view !== 'reports' && (
+          <select value={sortDir} onChange={(e) => setSortDir(e.target.value)} title="Grouped by category, then package">
+            <option value="asc">Name A–Z</option>
+            <option value="desc">Name Z–A</option>
+          </select>
+          )}
+          <button className={showForm ? 'btn' : 'btn btn-primary'} onClick={toggleForm}>
             {showForm ? 'Cancel' : 'Add Component'}
           </button>
         </div>
@@ -375,7 +354,7 @@ function App() {
               </select>
               <div className="field-add">
                 <input type="text" placeholder="New category..." value={newCategory} onChange={(e) => setNewCategory(e.target.value)} />
-                <button type="button" className="btn btn-sm" onClick={handleAddCategory}>Add</button>
+                <button type="button" className="btn btn-sm" onClick={() => addName('categories', newCategory, setNewCategory)}>Add</button>
               </div>
             </div>
             <div className="field">
@@ -386,7 +365,7 @@ function App() {
               </select>
               <div className="field-add">
                 <input type="text" placeholder="New package..." value={newPackage} onChange={(e) => setNewPackage(e.target.value)} />
-                <button type="button" className="btn btn-sm" onClick={handleAddPackage}>Add</button>
+                <button type="button" className="btn btn-sm" onClick={() => addName('packages', newPackage, setNewPackage)}>Add</button>
               </div>
             </div>
             <div className="field">
@@ -395,7 +374,16 @@ function App() {
             </div>
             <div className="field">
               <label>Location</label>
-              <input value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} />
+              <LocationPicker
+                value={form.location}
+                onChange={(v) => setForm({ ...form, location: v })}
+                locations={locations}
+              />
+              <div className="field-add">
+                <input type="text" placeholder="New main..." value={newLocMain} onChange={(e) => setNewLocMain(e.target.value)} />
+                <input type="text" placeholder="New subcathegory..." value={newLocSec} onChange={(e) => setNewLocSec(e.target.value)} />
+                <button type="button" className="btn btn-sm" onClick={handleAddLocation}>Add</button>
+              </div>
             </div>
             <div className="field">
               <label>Manufacturer Number</label>
@@ -410,64 +398,44 @@ function App() {
       )}
 
       {showPasswordModal && (
-        <div className="modal-backdrop">
-          <div className="modal">
-            <h2>Admin Password</h2>
-            <input
-              type="password"
-              autoFocus
-              value={passwordInput}
-              onChange={(e) => setPasswordInput(e.target.value)}
-              placeholder="Enter password"
-              onKeyDown={(e) => e.key === 'Enter' && handleUnlock(passwordInput)}
-            />
-            <div className="actions">
-              <button className="btn" onClick={() => { setShowPasswordModal(false); setPasswordInput(''); }}>Cancel</button>
-              <button className="btn btn-primary" onClick={() => handleUnlock(passwordInput)}>Unlock</button>
-            </div>
-          </div>
-        </div>
+        <Modal
+          title="Admin Password"
+          type="password"
+          placeholder="Enter password"
+          actions={[['Unlock', 'btn-primary', handleUnlock]]}
+          onClose={() => setShowPasswordModal(false)}
+        />
       )}
 
       {showUseModal && (
-        <div className="modal-backdrop">
-          <div className="modal">
-            <h2>Use Component</h2>
-            <input
-              type="number"
-              autoFocus
-              value={useAmount}
-              onChange={(e) => setUseAmount(e.target.value)}
-              placeholder="Amount"
-              min="0"
-            />
-            <div className="actions">
-              <button className="btn" onClick={() => { setShowUseModal(null); setUseAmount(''); }}>Cancel</button>
-              <button className="btn btn-warn" onClick={() => handleUse(showUseModal, 'take')}>Take</button>
-              <button className="btn btn-ok" onClick={() => handleUse(showUseModal, 'return')}>Return</button>
-            </div>
-          </div>
-        </div>
+        <Modal
+          title="Use Component"
+          placeholder="Amount"
+          actions={[
+            ['Take', 'btn-warn', (v) => handleUse(showUseModal, 'take', v)],
+            ['Return', 'btn-ok', (v) => handleUse(showUseModal, 'return', v)]
+          ]}
+          onClose={() => setShowUseModal(null)}
+        />
       )}
 
       {showReportRealModal && (
-        <div className="modal-backdrop">
-          <div className="modal">
-            <h2>Report Real Number</h2>
-            <input
-              type="number"
-              autoFocus
-              value={reportRealAmount}
-              onChange={(e) => setReportRealAmount(e.target.value)}
-              placeholder="Actual quantity"
-              min="0"
-            />
-            <div className="actions">
-              <button className="btn" onClick={() => { setShowReportRealModal(null); setReportRealAmount(''); }}>Cancel</button>
-              <button className="btn btn-primary" onClick={() => handleReportReal(showReportRealModal)}>Report</button>
-            </div>
+        <Modal
+          title="Report Real Number"
+          placeholder="Actual quantity"
+          actions={[['Report', 'btn-primary', (v) => handleReportReal(showReportRealModal, v)]]}
+          onClose={() => setShowReportRealModal(null)}
+        />
+      )}
+
+      {ctxMenu && (
+        <>
+          <div className="ctx-backdrop" onClick={() => setCtxMenu(null)} onContextMenu={(e) => { e.preventDefault(); setCtxMenu(null) }} />
+          <div className="ctx-menu" style={{ top: ctxMenu.y, left: ctxMenu.x }}>
+            <button onClick={() => startEdit(ctxMenu.comp)}>Edit</button>
+            <button onClick={() => startCopy(ctxMenu.comp)}>Copy</button>
           </div>
-        </div>
+        </>
       )}
 
       {view === 'reports' ? (
@@ -511,16 +479,58 @@ function App() {
           </thead>
           <tbody>
             {rows.map((comp) => (
-              <tr key={comp.inventory_key} className={comp.in_stock === 0 ? 'is-empty' : undefined}>
+              <tr
+                key={comp.inventory_key}
+                className={comp.in_stock === 0 ? 'is-empty' : undefined}
+                onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY, comp }) }}
+              >
                 <td className="mono">{comp.inventory_key}</td>
-                <td className="name">{comp.name}</td>
-                <td>{comp.category}</td>
-                <td>{comp.package}</td>
-                <td className="num">{comp.in_stock}</td>
-                <td>{comp.location}</td>
-                <td className="mono">{comp.manufacturer_nr}</td>
+                {editKey === comp.inventory_key ? (
+                  <>
+                    <td><input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} /></td>
+                    <td>
+                      <select value={editForm.category} onChange={(e) => setEditForm({ ...editForm, category: e.target.value })}>
+                        {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <select value={editForm.package || ''} onChange={(e) => setEditForm({ ...editForm, package: e.target.value })}>
+                        <option value="">—</option>
+                        {packages.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
+                      </select>
+                    </td>
+                    <td className="num">
+                      <input type="number" min="0" value={editForm.in_stock} onChange={(e) => setEditForm({ ...editForm, in_stock: e.target.value })} />
+                    </td>
+                    <td>
+                      <LocationPicker
+                        value={editForm.location || ''}
+                        onChange={(v) => setEditForm({ ...editForm, location: v })}
+                        locations={locations}
+                      />
+                    </td>
+                    <td><input value={editForm.manufacturer_nr || ''} onChange={(e) => setEditForm({ ...editForm, manufacturer_nr: e.target.value })} /></td>
+                  </>
+                ) : (
+                  <>
+                    <td className="name">{comp.name}</td>
+                    <td>{comp.category}</td>
+                    <td>{comp.package}</td>
+                    <td className="num">{comp.in_stock}</td>
+                    <td>{comp.location}</td>
+                    <td className="mono">{comp.manufacturer_nr}</td>
+                  </>
+                )}
                 <td>
                   <div className="cell-actions">
+                    {editKey === comp.inventory_key ? (
+                      <>
+                        {adminPw
+                          ? <button className="btn btn-sm btn-primary" onClick={saveEdit}>Save</button>
+                          : <button className="btn btn-sm btn-ok" onClick={suggestEdit}>Suggest</button>}
+                        <button className="btn btn-sm" onClick={cancelEdit}>Cancel</button>
+                      </>
+                    ) : (<>
                     <button className="btn btn-sm btn-primary" onClick={() => setShowUseModal(showUseModal === comp.inventory_key ? null : comp.inventory_key)}>Use</button>
                     <select
                       className="report-select"
@@ -541,12 +551,13 @@ function App() {
                     {adminPw && (
                       <button className="btn btn-sm btn-danger" onClick={() => handleDelete(comp.inventory_key, comp.name)}>Delete</button>
                     )}
+                    </>)}
                   </div>
                 </td>
               </tr>
             ))}
             {suggestedRows.map((comp) => (
-              <tr key={comp.inventory_key} className={comp.in_stock === 0 ? 'is-empty' : 'is-suggested'}>
+              <tr key={'suggested-' + comp.inventory_key} className={comp.in_stock === 0 ? 'is-empty' : 'is-suggested'}>
                 <td className="mono">{comp.inventory_key}</td>
                 <td className="name">{comp.name}</td>
                 <td>{comp.category}</td>

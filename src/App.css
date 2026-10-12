@@ -412,3 +412,52 @@ tr.is-suggested td:first-child {
   padding: 5px 8px;
   font-size: 13px;
 }
+
+/* Right-click menu on a component row. The backdrop closes it on any click
+   (including a second right-click) without a document-level listener. */
+.ctx-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.ctx-menu {
+  position: fixed;
+  z-index: 41;
+  min-width: 140px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+}
+
+.ctx-menu button {
+  display: block;
+  width: 100%;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  font: inherit;
+  font-size: 14px;
+  /* --text-h, not the muted --text body color: the item has to read against --surface */
+  color: var(--text-h);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ctx-menu button:hover {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+/* An edit-in-progress row: keep the inputs from blowing the column widths out. */
+tbody input,
+tbody select {
+  width: 100%;
+  min-width: 70px;
+  box-sizing: border-box;
+}
+td.num input {
+  text-align: right;
+}
