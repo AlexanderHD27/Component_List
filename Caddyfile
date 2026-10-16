@@ -1,0 +1,6 @@
+:3000 {
+	reverse_proxy /api/* api:3001
+
+	root /srv
+	file_server
+}
