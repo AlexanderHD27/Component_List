@@ -1,5 +1,6 @@
 .claude
 .entire
+.env
 dist
 node_modules
 README.md
